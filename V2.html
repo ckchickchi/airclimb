@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>山坡空氣塊上升模擬</title>
+    <!-- Tailwind CSS 3.4 CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- D3.js CDN -->
+    <script src="https://unpkg.com/d3@7"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=PingFang+TC&family=Noto+Sans+TC:wght@400;500;700&display=swap');
+        
+        :root {
+            --color-natural-bg: #f8f7f2;
+            --color-natural-card: #ffffff;
+            --color-natural-green: #6b8e23;
+            --color-natural-brown: #8b7355;
+            --color-natural-text: #3d3d3d;
+            --color-natural-muted: #4a4a4a; /* Darkened from #7a7a7a */
+            --color-natural-mountain: #d4e0c8;
+            --color-natural-line: #e0e0d1;
+        }
+
+        body {
+            background-color: var(--color-natural-bg);
+            color: var(--color-natural-text);
+            font-family: 'PingFang TC', 'Noto Sans TC', sans-serif;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .natural-card {
+            background-color: var(--color-natural-card);
+            border-radius: 1rem;
+            border: 1px solid var(--color-natural-line);
+            padding: 1.25rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+        }
+
+        .natural-header {
+            font-size: 1.25rem; /* Increased from 1.1rem */
+            font-weight: bold;
+            color: var(--color-natural-brown);
+            margin-bottom: 1rem;
+            border-left: 4px solid var(--color-natural-green);
+            padding-left: 0.625rem;
+        }
+
+        .natural-label {
+            font-size: 14px; /* Increased from 0.85rem */
+            color: var(--color-natural-muted);
+            display: block;
+            margin-bottom: 0.125rem;
+        }
+
+        .natural-value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: var(--color-natural-green);
+        }
+
+        .btn-natural-start {
+            padding: 0.5rem 1.5rem;
+            border-radius: 9999px;
+            background-color: var(--color-natural-green);
+            color: white;
+            font-weight: 600;
+            transition: opacity 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn-natural-start:hover { opacity: 0.9; }
+        .btn-natural-start:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-natural-reset {
+            padding: 0.5rem 1.5rem;
+            border-radius: 9999px;
+            background-color: var(--color-natural-line);
+            color: var(--color-natural-text);
+            font-weight: 600;
+            transition: opacity 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn-natural-reset:hover { opacity: 0.9; }
+
+        /* Cloud animation */
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-5px); }
+            100% { transform: translateY(0px); }
+        }
+        .cloud-particle {
+            animation: float 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Constants & Physics ---
+        const MAX_HEIGHT = 4000;
+        const TEMP_RANGE = [-10, 40]; // Celsius
+        const VP_RANGE = [0, 80];   // hPa
+
+        const getEs = (T) => 6.11 * Math.pow(10, (7.5 * T) / (237.3 + T));
+        const getTd = (e) => {
+            const log = Math.log10(e / 6.11);
+            return (237.3 * log) / (7.5 - log);
+        };
+
+        function App() {
+            // --- State ---
+            const [envT, setEnvT] = useState(30);
+            const [envE, setEnvE] = useState(20);
+            const [isAnimating, setIsAnimating] = useState(false);
+            const [currentH, setCurrentH] = useState(0);
+            const [simulationData, setSimulationData] = useState({
+                lcl: null,
+                lclTd: null,
+                summitT: null
+            });
+            const [history, setHistory] = useState([]);
+
+            const currentEs = useMemo(() => getEs(envT), [envT]);
+            const currentRH = useMemo(() => Math.min(100, (envE / currentEs) * 100), [envE, currentEs]);
+            const initialTd = useMemo(() => getTd(envE), [envE]);
+
+            // --- Animation Logic ---
+            useEffect(() => {
+                let requestRef;
+                const stepSize = 25;
+
+                const animate = () => {
+                    setCurrentH((prevH) => {
+                        if (prevH >= MAX_HEIGHT) {
+                            setIsAnimating(false);
+                            return MAX_HEIGHT;
+                        }
+                        return prevH + stepSize;
+                    });
+                    requestRef = requestAnimationFrame(animate);
+                };
+
+                if (isAnimating) {
+                    requestRef = requestAnimationFrame(animate);
+                }
+                return () => cancelAnimationFrame(requestRef);
+            }, [isAnimating]);
+
+            const calculateResults = (t0, e0) => {
+                let t = t0;
+                let td = getTd(e0);
+                let lcl = null;
+                let lclTd = null;
+                const itTd = td;
+
+                for (let h = 0; h <= MAX_HEIGHT; h += 10) {
+                    if (t > td) {
+                        t = t0 - (h / 100) * 1.0;
+                        td = itTd;
+                    } else {
+                        if (lcl === null) {
+                            lcl = h;
+                            lclTd = td;
+                        }
+                        const hAboveLcl = h - lcl;
+                        t = lclTd - (hAboveLcl / 100) * 0.6;
+                        td = t;
+                    }
+                }
+                return { lcl, lclTd, summitT: t };
+            };
+
+            const parcelState = useMemo(() => {
+                let t = envT;
+                let td = initialTd;
+                let lcl = null;
+                let lclTd = null;
+
+                for (let h = 0; h <= currentH; h += 10) {
+                    if (t > td) {
+                        t = envT - (h / 100) * 1.0;
+                        td = initialTd;
+                    } else {
+                        if (lcl === null) {
+                            lcl = h;
+                            lclTd = td;
+                        }
+                        const hAboveLcl = h - lcl;
+                        t = lclTd - (hAboveLcl / 100) * 0.6;
+                        td = t;
+                    }
+                }
+                return { t, td, lcl, lclTd, e: getEs(td) };
+            }, [currentH, envT, initialTd]);
+
+            useEffect(() => {
+                if (parcelState.lcl !== null && simulationData.lcl === null) {
+                    setSimulationData(prev => ({ ...prev, lcl: parcelState.lcl, lclTd: parcelState.lclTd }));
+                }
+                if (currentH >= MAX_HEIGHT && simulationData.summitT === null) {
+                    setSimulationData(prev => ({ ...prev, summitT: parcelState.t }));
+                }
+            }, [parcelState.lcl, parcelState.lclTd, parcelState.t, currentH, simulationData.lcl, simulationData.summitT]);
+
+            const handleStart = () => {
+                setSimulationData({ lcl: null, lclTd: null, summitT: null });
+                setCurrentH(0);
+                setIsAnimating(true);
+                
+                // Add initial record with null results
+                setHistory(prev => [{
+                    id: Date.now(),
+                    t0: envT,
+                    e0: envE,
+                    lcl: null,
+                    summitT: null,
+                    isFinished: false
+                }, ...prev]);
+            };
+
+            const handleReset = () => {
+                setIsAnimating(false);
+                setCurrentH(0);
+                setSimulationData({ lcl: null, lclTd: null, summitT: null });
+            };
+
+            useEffect(() => {
+                if (currentH >= MAX_HEIGHT && history.length > 0 && !history[0].isFinished) {
+                    const results = calculateResults(history[0].t0, history[0].e0);
+                    setHistory(prev => {
+                        const newHistory = [...prev];
+                        newHistory[0] = {
+                            ...newHistory[0],
+                            lcl: results.lcl,
+                            summitT: results.summitT,
+                            isFinished: true
+                        };
+                        return newHistory;
+                    });
+                }
+            }, [currentH, history]);
+
+            const clearHistory = () => setHistory([]);
+
+            // --- Chart Rendering ---
+            const chartRef = useRef(null);
+            const margin = { top: 20, right: 30, bottom: 60, left: 50 }; // Increased bottom margin
+
+            useEffect(() => {
+                if (!chartRef.current) return;
+                const svg = d3.select(chartRef.current);
+                const width = chartRef.current.clientWidth;
+                const height = chartRef.current.clientHeight;
+                svg.selectAll("*").remove();
+
+                const xScale = d3.scaleLinear().domain(TEMP_RANGE).range([margin.left, width - margin.right]);
+                const yScale = d3.scaleLinear().domain(VP_RANGE).range([height - margin.bottom, margin.top]);
+
+                // Axes
+                svg.append("g")
+                    .attr("transform", `translate(0,${height - margin.bottom})`)
+                    .call(d3.axisBottom(xScale).ticks(10))
+                    .attr("color", "#333") // Darkened axis
+                    .selectAll("text")
+                    .style("font-size", "14px");
+
+                svg.append("g")
+                    .attr("transform", `translate(0,${height - margin.bottom})`)
+                    .append("text")
+                    .attr("x", width - margin.right)
+                    .attr("y", 50) // Adjusted y position
+                    .attr("fill", "#333")
+                    .attr("text-anchor", "end")
+                    .style("font-size", "14px")
+                    .text("溫度 (°C)");
+
+                svg.append("g")
+                    .attr("transform", `translate(${margin.left},0)`)
+                    .call(d3.axisLeft(yScale).ticks(VP_RANGE[1] / 5)) // Ticks every 5 hPa
+                    .attr("color", "#333") // Darkened axis
+                    .selectAll("text")
+                    .style("font-size", "14px");
+
+                svg.append("g")
+                    .attr("transform", `translate(${margin.left},0)`)
+                    .append("text")
+                    .attr("x", -margin.top)
+                    .attr("y", -40)
+                    .attr("fill", "#333")
+                    .attr("text-anchor", "end")
+                    .attr("transform", "rotate(-90)")
+                    .style("font-size", "14px")
+                    .text("水氣壓 (hPa)");
+
+                // Saturation Curve
+                const line = d3.line().x(d => xScale(d[0])).y(d => yScale(d[1]));
+                const curveData = d3.range(TEMP_RANGE[0], TEMP_RANGE[1] + 1).map(t => [t, getEs(t)]);
+                svg.append("path").datum(curveData).attr("fill", "none").attr("stroke", "#8b7355").attr("stroke-width", 2).attr("d", line);
+
+                // Grid - Darkened to #ccc
+                svg.append("g").attr("color", "#ccc").attr("transform", `translate(0,${height - margin.bottom})`).call(d3.axisBottom(xScale).tickSize(-height + margin.top + margin.bottom).tickFormat(() => ""));
+                svg.append("g").attr("color", "#ccc").attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(yScale).ticks(VP_RANGE[1] / 5).tickSize(-width + margin.left + margin.right).tickFormat(() => ""));
+
+                // LCL Point
+                if (simulationData.lclTd !== null) {
+                    svg.append("circle").attr("cx", xScale(simulationData.lclTd)).attr("cy", yScale(getEs(simulationData.lclTd))).attr("r", 8).attr("fill", "#3498db").attr("stroke", "white").attr("stroke-width", 2);
+                }
+
+                // Animation Point
+                if (currentH > 0) {
+                    svg.append("circle").attr("cx", xScale(parcelState.t)).attr("cy", yScale(parcelState.e)).attr("r", 8).attr("fill", "#d12e96").attr("stroke", "white").attr("stroke-width", 1.5);
+                }
+
+                // Red Dot
+                const drag = d3.drag().on("drag", (event) => {
+                    const newT = Math.max(TEMP_RANGE[0], Math.min(TEMP_RANGE[1], xScale.invert(event.x)));
+                    const maxE = getEs(newT);
+                    const newE = Math.max(VP_RANGE[0], Math.min(maxE, yScale.invert(event.y)));
+                    setEnvT(newT);
+                    setEnvE(newE);
+                });
+
+                svg.append("circle").attr("cx", xScale(envT)).attr("cy", yScale(envE)).attr("r", 8).attr("fill", "#ff4d4d").attr("stroke", "white").attr("stroke-width", 2).style("cursor", "grab").call(drag);
+
+            }, [envT, envE, simulationData, currentH, parcelState]);
+
+            return (
+                <div className="flex h-screen w-screen p-2.5 gap-2.5 max-w-[1500px] max-h-[800px] mx-auto overflow-hidden">
+                    {/* Block 1 - Fixed width to prevent compression */}
+                    <div className="natural-card w-[500px] flex-shrink-0 flex flex-col relative">
+                        <h2 className="natural-header">飽和水氣壓曲線</h2>
+                        <div className="flex-1 relative">
+                            <svg ref={chartRef} className="w-full h-full" />
+                        </div>
+                    </div>
+
+                    {/* Middle Column - Flexible */}
+                    <div className="flex-1 min-w-0 flex flex-col gap-2.5">
+                        <div className="flex-1 flex gap-2.5 min-h-0">
+                            {/* Block 2 */}
+                            <div className="natural-card flex-1 flex flex-col">
+                                <h2 className="natural-header">山底空氣狀態(紅點)</h2>
+                                <div className="space-y-4 overflow-y-auto pr-2">
+                                    <div className="data-item">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <span className="natural-label">溫度 (T)</span>
+                                            <span className="text-[14px] font-semibold text-gray-700">{envT.toFixed(1)} °C</span>
+                                        </div>
+                                        <input 
+                                            type="range" 
+                                            min={TEMP_RANGE[0]} 
+                                            max={TEMP_RANGE[1]} 
+                                            step="0.1"
+                                            value={envT}
+                                            onChange={(e) => {
+                                                const val = parseFloat(e.target.value);
+                                                setEnvT(val);
+                                                if (envE > getEs(val)) setEnvE(getEs(val));
+                                            }}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#6b8e23]"
+                                        />
+                                    </div>
+                                    <div className="data-item">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <span className="natural-label">實際水氣壓 (e)</span>
+                                            <span className="text-[14px] font-semibold text-gray-700">{envE.toFixed(2)} hPa</span>
+                                        </div>
+                                        <input 
+                                            type="range" 
+                                            min={VP_RANGE[0]} 
+                                            max={VP_RANGE[1]} 
+                                            step="0.01"
+                                            value={envE}
+                                            onChange={(e) => {
+                                                const val = parseFloat(e.target.value);
+                                                setEnvE(Math.min(val, getEs(envT)));
+                                            }}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#6b8e23]"
+                                        />
+                                    </div>
+                                    <div className="data-item pt-2 border-t border-gray-100 flex justify-between items-center">
+                                        <span className="natural-label mb-0">飽和水氣壓 (es)</span>
+                                        <div className="natural-value text-[18px]">{currentEs.toFixed(2)} hPa</div>
+                                    </div>
+                                    <div className="data-item flex justify-between items-center">
+                                        <span className="natural-label mb-0">相對濕度 (RH)</span>
+                                        <div className="natural-value text-[18px]">{currentRH.toFixed(1)} %</div>
+                                    </div>
+                                </div>
+                            </div>
+                            {/* Block 3 */}
+                            <div className="natural-card flex-1 flex flex-col">
+                                <h2 className="natural-header">爬升結果</h2>
+                                <div className="space-y-4 overflow-y-auto">
+                                    <div className="data-item">
+                                        <span className="natural-label">凝結高度</span>
+                                        <div className="natural-value text-right">{simulationData.lcl !== null ? `${Math.round(simulationData.lcl)} m` : "-- m"}</div>
+                                    </div>
+                                    <div className="data-item">
+                                        <span className="natural-label">露點溫度 (Td)</span>
+                                        <div className="natural-value text-right">{simulationData.lclTd !== null ? `${simulationData.lclTd.toFixed(1)} °C` : "-- °C"}</div>
+                                    </div>
+                                    <div className="data-item">
+                                        <span className="natural-label">山頂溫度 (Tpeak)</span>
+                                        <div className="natural-value text-right">{simulationData.summitT !== null ? `${simulationData.summitT.toFixed(1)} °C` : "-- °C"}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Block 4 */}
+                        <div className="natural-card flex-1 relative flex flex-col min-h-0">
+                            <div className="absolute top-5 left-5 z-10 flex gap-2.5">
+                                <button onClick={handleStart} disabled={isAnimating} className="btn-natural-start">開始爬升</button>
+                                <button onClick={handleReset} className="btn-natural-reset">重置</button>
+                            </div>
+                            <div className="flex-1 relative">
+                                <svg className="w-full h-full overflow-visible" viewBox="0 0 500 300">
+                                    {/* Mountain Path: Base at y=230, Top at y=80, Bottom at y=260 (shrunk) */}
+                                    <path d="M 0 230 L 450 80 L 500 80 L 500 260 L 0 260 Z" fill="#d4e0c8" />
+                                    <g transform="translate(460, 0)">
+                                        <line x1="0" y1="230" x2="0" y2="80" stroke="#bbb" strokeWidth="1" />
+                                        {[0, 1000, 2000, 3000, 4000].map(h => (
+                                            <text key={h} x="10" y={230 - (h/4000)*150 + 5} fontSize="14" fill="#333">{h}m</text>
+                                        ))}
+                                    </g>
+                                    {(() => {
+                                        // Align air parcel with mountain path (Base y=230, Height=150)
+                                        const x = (currentH / 4000) * 450;
+                                        const y = 230 - (currentH / 4000) * 150;
+                                        const isSaturated = simulationData.lcl !== null && currentH >= simulationData.lcl;
+                                        return (
+                                            <g transform={`translate(${x}, ${y})`}>
+                                                {isSaturated ? (
+                                                    <g className="cloud-particle">
+                                                        {/* Cloud shape using overlapping circles */}
+                                                        <circle cx="-12" cy="2" r="10" fill="#f0f9ff" stroke="#bae6fd" strokeWidth="1" />
+                                                        <circle cx="12" cy="2" r="10" fill="#f0f9ff" stroke="#bae6fd" strokeWidth="1" />
+                                                        <circle cx="0" cy="-8" r="14" fill="#f0f9ff" stroke="#bae6fd" strokeWidth="1" />
+                                                        <circle cx="0" cy="6" r="10" fill="#f0f9ff" stroke="#bae6fd" strokeWidth="1" />
+                                                        {/* Inner fill to hide strokes of overlapping circles */}
+                                                        <circle cx="-12" cy="2" r="9.5" fill="#f0f9ff" />
+                                                        <circle cx="12" cy="2" r="9.5" fill="#f0f9ff" />
+                                                        <circle cx="0" cy="-8" r="13.5" fill="#f0f9ff" />
+                                                        <circle cx="0" cy="6" r="9.5" fill="#f0f9ff" />
+                                                    </g>
+                                                ) : (
+                                                    <circle r="12" fill="rgba(255, 255, 255, 0.9)" stroke="#6b8e23" strokeWidth="2" />
+                                                )}
+                                            </g>
+                                        );
+                                    })()}
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Block 5 - History Table */}
+                    <div className="natural-card w-[320px] flex-shrink-0 flex flex-col relative">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="natural-header mb-0">模擬紀錄</h2>
+                            <button 
+                                onClick={clearHistory}
+                                className="text-[14px] px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 transition-colors"
+                            >
+                                清空
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-hidden flex flex-col">
+                            <div className="overflow-y-auto flex-1">
+                                <table className="w-full text-[14px] text-left">
+                                    <thead className="sticky top-0 bg-white border-b border-gray-100">
+                                        <tr>
+                                            <th className="py-2 font-medium text-gray-500">起始溫度/水氣壓</th>
+                                            <th className="py-2 font-medium text-gray-500">凝結高度</th>
+                                            <th className="py-2 font-medium text-gray-500">山頂溫度</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-50">
+                                        {history.map(record => (
+                                            <tr key={record.id} className="hover:bg-gray-50 transition-colors">
+                                                <td className="py-2 text-gray-700">
+                                                    {record.t0.toFixed(1)}°C / {record.e0.toFixed(1)}hPa
+                                                </td>
+                                                <td className="py-2 text-gray-700 font-medium">
+                                                    {!record.isFinished ? (
+                                                        <span className="text-gray-400 animate-pulse text-xs">模擬中...</span>
+                                                    ) : (
+                                                        record.lcl !== null ? `${Math.round(record.lcl)}m` : "無"
+                                                    )}
+                                                </td>
+                                                <td className="py-2 text-gray-700">
+                                                    {!record.isFinished ? (
+                                                        <span className="text-gray-400 animate-pulse text-xs">...</span>
+                                                    ) : (
+                                                        `${record.summitT.toFixed(1)}°C`
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                        {history.length === 0 && (
+                                            <tr>
+                                                <td colSpan="3" className="py-8 text-center text-gray-400 italic">
+                                                    尚無紀錄
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
